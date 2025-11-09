@@ -1,0 +1,371 @@
+import struct
+import re
+import json
+import base64
+from io import BytesIO, FileIO
+from enum import Enum, unique
+
+@unique
+class UTFTableValueType(Enum):
+    ## UTF表所包含的数据类型
+    ## 此部分来自vgmstream
+    COLUMN_TYPE_UINT8           = 0x00
+    COLUMN_TYPE_SINT8           = 0x01
+    COLUMN_TYPE_UINT16          = 0x02
+    COLUMN_TYPE_SINT16          = 0x03
+    COLUMN_TYPE_UINT32          = 0x04
+    COLUMN_TYPE_SINT32          = 0x05
+    COLUMN_TYPE_UINT64          = 0x06
+    COLUMN_TYPE_SINT64          = 0x07
+    COLUMN_TYPE_FLOAT           = 0x08
+    COLUMN_TYPE_DOUBLE          = 0x09
+    COLUMN_TYPE_STRING          = 0x0a
+    COLUMN_TYPE_VLDATA          = 0x0b
+    COLUMN_TYPE_UINT128         = 0x0c # for GUIDs
+    COLUMN_TYPE_UNDEFINED       = -1
+
+class UTFTable:
+    ## UTF表是Cri定义的一种数据结构，可嵌套
+    ## 文件头部大小为0x20字节，其后依次为模式数据区域、行数据区域、字符串数据区域、字节数据区域
+
+    def __init__(self, stream: str|bytes, encoding: str="utf8") -> None:
+        if type(stream) == str:
+            self.stream = FileIO(stream)
+            self.filename = re.split(r"[/\\]", stream)[-1]
+        else:
+            self.stream = BytesIO(stream)
+            self.filename = ""
+        self.headerRead()
+        self.headerCheck()
+        self.encoding = encoding
+        self.table_name = self.stringDataGet(self.name_offset_rtst)
+        self.parsed = False
+
+    def headerRead(self) -> None:
+        ## 文件头读取，大端序，含头部标识(4字节)、UTF表大小(4字节)、版本号(2字节)、
+        ## 行数据区域偏移量(2字节)、字符串数据区域偏移量(4字节)、字节数据区域偏移量(4字节)、
+        ## 表格名称相对于字符串数据区域头部的偏移量(4字节)、列数(2字节)、行宽(2字节)、行数(4字节)
+        ## 表格名称偏移量是相对于字符串数据区域头部的
+        ## 其它偏移量则默认以UTF表开头为基准点(注意其它偏移量及UTF表大小读取后需+8)
+        stream = self.stream
+        stream.seek(0)
+        self.headerID = stream.read(4)
+
+        if self.headerID == b"@UTF":
+            #self.encrypted = False
+            pass
+        elif self.headerID == b"\x1f\x9e\xf3\xf5":
+            #self.encrypted = True
+            ## 似乎是加密的UTF表，暂不作处理
+            raise ValueError("invalid utf table header")
+        else:
+            raise ValueError("invalid utf table header")
+        
+        self.table_size = struct.unpack(">I", stream.read(4))[0] + 0x08
+        self.version = struct.unpack(">H", stream.read(2))[0]
+        self.rows_offset = struct.unpack(">H", stream.read(2))[0] + 0x08
+        self.strings_offset = struct.unpack(">I", stream.read(4))[0] + 0x08
+        self.data_offset = struct.unpack(">I", stream.read(4))[0] + 0x08
+        self.name_offset_rtst = struct.unpack(">I", stream.read(4))[0]
+        self.columns_count = struct.unpack(">H", stream.read(2))[0]
+        self.row_width = struct.unpack(">H", stream.read(2))[0]
+        self.rows_count = struct.unpack(">I", stream.read(4))[0]
+
+    ## 根据文件头数据计算各区域大小，并检查其是否合法
+    def headerCheck(self) -> None:
+        self.schema_size    = self.rows_offset - 0x20
+        self.rows_size      = self.strings_offset - self.rows_offset
+        self.strings_size   = self.data_offset - self.strings_offset
+        self.data_size      = self.table_size - self.data_offset
+
+        if self.schema_size < 0:
+            raise ValueError(f"invalid schema size: {self.schema_size}")
+        
+        if (self.rows_size < 0) or (self.rows_size < self.rows_count*self.row_width):
+            raise ValueError(f"invalid rows size: {self.rows_size}")
+        
+        if (self.strings_size < 0) or (self.strings_size < self.name_offset_rtst):
+            raise ValueError(f"invalid strings size: {self.strings_size}")
+        
+        if self.data_size < 0:
+            raise ValueError(f"invalid data size: {self.data_size}")
+
+    def utfParse(self) -> None:
+        stream = self.stream
+        data_columns = []
+
+        ## 模式数据区域解析，依次遍历各列的模式数据
+        ## 每列的模式数据有数据信息(1字节)及列名偏移量(4字节)，以及常量数据(可选)
+        ## 数据信息分为两部分，高4位数据标志(包含哪些数据)，低4位为类型标志
+        ## 列名偏移量是相对于字符串数据区域头部的
+        offset = 0x20
+        offset_in_row = 0
+        for _ in range(0, self.columns_count):
+            if offset + 5 - 0x20 > self.schema_size:
+                raise ValueError(f"schema offset out of bounds: {offset + 5 - 0x20:x}")
+            stream.seek(offset)
+            info        = struct.unpack(">B", stream.read(1))[0]
+            name_offset = struct.unpack(">I", stream.read(4))[0]
+            offset += 5
+
+            data_flag = info >> 4
+            type_flag = info & 0x0F
+            value_type = UTFTableValueType(type_flag)
+
+            ## 处理数据标志，数据标志共4位
+            ## 0x10位为列名，0x20位为常量数据，0x40为行数据，0x80位未知
+            ## 目前常见的组合有『列名+常量』及『列名+行数据』
+            ## 古早版本中出现过『列名+常量+行数据』的情况，但在新版中这被认为是无意义的
+            ## 目前处理的情况有：『列名』(01)、『列名+常量』(03)、『列名+行数据』(05)
+            data_flag_name = False
+            data_flag_constant = False
+            data_flag_row = False
+            if data_flag == 0x01:
+                data_flag_name = True
+            elif data_flag == 0x03:
+                data_flag_name = True
+                data_flag_constant = True
+            elif data_flag == 0x05:
+                data_flag_name = True
+                data_flag_row = True
+            else:
+                raise ValueError(f"unsupported data flag: {data_flag}")
+            
+            ## 处理类型标志
+            if value_type == UTFTableValueType.COLUMN_TYPE_UINT8:
+                value_size = 1
+                value_type_fc = ">B"
+            elif value_type == UTFTableValueType.COLUMN_TYPE_SINT8:
+                value_size = 1
+                value_type_fc = ">b"
+            elif value_type == UTFTableValueType.COLUMN_TYPE_UINT16:
+                value_size = 2
+                value_type_fc = ">H"
+            elif value_type == UTFTableValueType.COLUMN_TYPE_SINT16:
+                value_size = 2
+                value_type_fc = ">h"
+            elif value_type == UTFTableValueType.COLUMN_TYPE_UINT32:
+                value_size = 4
+                value_type_fc = ">I"
+            elif value_type == UTFTableValueType.COLUMN_TYPE_SINT32:
+                value_size = 4
+                value_type_fc = ">i"
+            elif value_type == UTFTableValueType.COLUMN_TYPE_UINT64:
+                value_size = 8
+                value_type_fc = ">Q"
+            elif value_type == UTFTableValueType.COLUMN_TYPE_SINT64:
+                value_size = 8
+                value_type_fc = ">q"
+            elif value_type == UTFTableValueType.COLUMN_TYPE_FLOAT:
+                value_size = 4
+                value_type_fc = ">f"
+            elif value_type == UTFTableValueType.COLUMN_TYPE_DOUBLE:
+                value_size = 8
+                value_type_fc = ">d"
+            ## 注意，以下两种类型为变长类型，其在模式数据区域及行数据区域中仅存储起始偏移量等信息
+            ## 『COLUMN_TYPE_STRING』为字符串，其数据本身存储于字符串数据区域，
+            ## 模式数据区域及行数据区域中存储其相对于字符串数据区域开头的偏移量(4字节)
+            ## 『COLUMN_TYPE_VLDATA』为二进制数据，其数据本身存储于字节数据区域，
+            ## 模式数据区域及行数据区域中存储其相对于字节数据区域开头的偏移量(4字节)、数据长度(4字节)
+            elif value_type == UTFTableValueType.COLUMN_TYPE_STRING:
+                value_size = 4
+                value_type_fc = ">I"
+            elif value_type == UTFTableValueType.COLUMN_TYPE_VLDATA:
+                value_size = 8
+                value_type_fc = ">II"
+            else:
+                raise ValueError(f"unsupported value type: {value_type.name}")
+            
+            ## 获取列名
+            if data_flag_name:
+                column_name = self.stringDataGet(name_offset)
+
+            ## 读取常量数据
+            if data_flag_constant:
+                if offset + value_size > self.schema_size:
+                    raise ValueError(f"schema offset out of bounds: {offset + value_size:x}")
+                stream.seek(offset)
+                column_value = struct.unpack(value_type_fc, stream.read(value_size))
+                offset += value_size
+
+                ## 处理字符串以及二进制数据
+                if value_type == UTFTableValueType.COLUMN_TYPE_STRING:
+                    column_data_constant = self.stringDataGet(column_value[0])
+                elif value_type == UTFTableValueType.COLUMN_TYPE_VLDATA:
+                    column_data_constant = self.binaryDataGet(column_value[0], column_value[1])
+                else:
+                    column_data_constant = column_value[0]
+
+            ## 获取行数据偏移量并逐行读取数据
+            if data_flag_row:
+                if offset_in_row + value_size > self.row_width:
+                    raise ValueError(f"row offset out of bounds: {offset_in_row + value_size:x}")
+                column_offset_in_row = offset_in_row
+                offset_in_row += value_size
+
+                column_data_rows = []
+                if value_type == UTFTableValueType.COLUMN_TYPE_STRING:
+                    for row_idx in range(0, self.rows_count):
+                        stream.seek(self.rows_offset + row_idx*self.row_width + column_offset_in_row)
+                        column_row_value = struct.unpack(value_type_fc, stream.read(value_size))
+                        column_data_rows.append(self.stringDataGet(column_row_value[0]))
+                elif value_type == UTFTableValueType.COLUMN_TYPE_VLDATA:
+                    for row_idx in range(0, self.rows_count):
+                        stream.seek(self.rows_offset + row_idx*self.row_width + column_offset_in_row)
+                        column_row_value = struct.unpack(value_type_fc, stream.read(value_size))
+                        column_data_rows.append(self.binaryDataGet(column_row_value[0], column_row_value[1]))
+                else:
+                    for row_idx in range(0, self.rows_count):
+                        stream.seek(self.rows_offset + row_idx*self.row_width + column_offset_in_row)
+                        column_row_value = struct.unpack(value_type_fc, stream.read(value_size))
+                        column_data_rows.append(column_row_value[0])
+
+            ## 将此列的数据整理为字典
+            column_data = {"dataFlag":data_flag, "valueType":value_type.name}
+
+            if data_flag_name:
+                column_data["columnName"] = column_name
+
+            if data_flag_constant:
+                column_data["columnDataConstant"] = column_data_constant
+
+            if data_flag_row:
+                column_data["columnDataRows"] = column_data_rows.copy()
+            
+            data_columns.append(column_data.copy())
+
+        self.columns = data_columns
+        self.parsed = True
+            
+    ## 将UTF表的数据整理为用于json输出的字典
+    def utf2DictJson(self) -> dict:
+        if not self.parsed:
+            self.utfParse()
+        
+        data = {"tableName":self.table_name, "version":self.version, 
+                "rowsCount":self.rows_count, "columnsCount":self.columns_count}
+        
+        data_columns = []
+        for column in self.columns:
+            data_column = column.copy()
+            ## 将二进制数据编码为base64字符串
+            if data_column["valueType"] == "COLUMN_TYPE_VLDATA":
+                if data_column["dataFlag"] == 0x03:
+                    data_column["columnDataConstant"] = base64.b64encode(data_column["columnDataConstant"]).decode(self.encoding)
+                elif data_column["dataFlag"] == 0x05:
+                    ## 生成新的列表存储行数据以避免影响原值
+                    data_column_rows = [base64.b64encode(row).decode(self.encoding) for row in data_column["columnDataRows"]]
+                    data_column["columnDataRows"] = data_column_rows
+                elif data_column["dataFlag"] == 0x01:
+                    pass
+                else:
+                    raise ValueError(f"unsupported data flag: {data_column["dataFlag"]}")
+            data_columns.append(data_column)
+
+        data["columns"] = data_columns
+
+        return data
+                    
+    ## 将UTF表的数据递归地整理为用于json输出的字典
+    ## UTF表可能以二进制数据的形式存储于另一张UTF表里，此处尝试将嵌套的所有UTF表整理为字典
+    ## depth_max为最大深度，若当前深度大于此，则不再进行解析
+    ## depth用于指示当前的深度，一般不会主动传入
+    def utf2DictJsonRecursion(self, depth_max: int=5, depth: int=0) -> dict:
+        if depth > depth_max:
+            raise ValueError(f"current depth({depth}) exceeds the maximum depth({depth_max})")
+        
+        if not self.parsed:
+            self.utfParse()
+        
+        data = {"tableName":self.table_name, "version":self.version, 
+                "rowsCount":self.rows_count, "columnsCount":self.columns_count}
+        
+        data_columns = []
+        for column in self.columns:
+            data_column = column.copy()
+            ## 将二进制数据编码为base64字符串
+            if data_column["valueType"] == "COLUMN_TYPE_VLDATA":
+                if data_column["dataFlag"] == 0x03:
+                    data_raw = data_column["columnDataConstant"]
+                    if (data_raw[:4] == b"@UTF") and (depth < depth_max):
+                        data_column["valueType"] = "COLUMN_TYPE_VLDATA_UTFTABLE"
+                        utf_table = UTFTable(data_raw)
+                        utf_table_dict = utf_table.utf2DictJsonRecursion(depth_max, depth+1)
+                        data_column["columnDataConstant"] = utf_table_dict.copy()
+                    else:
+                        data_column["columnDataConstant"] = base64.b64encode(data_raw).decode(self.encoding)
+                elif data_column["dataFlag"] == 0x05:
+                    ## 生成新的列表存储行数据以避免影响原值
+                    ## 此处默认某列中的所有二进制数据都是UTF表(或者都不是)
+                    data_raw = data_column["columnDataRows"][0]
+                    if (data_raw[:4] == b"@UTF") and (depth < depth_max):
+                        data_column["valueType"] = "COLUMN_TYPE_VLDATA_UTFTABLE"
+                        data_column_rows = []
+                        for row in data_column["columnDataRows"]:
+                            utf_table = UTFTable(row)
+                            utf_table_dict = utf_table.utf2DictJsonRecursion(depth_max, depth+1)
+                            data_column_rows.append(utf_table_dict.copy())
+                        data_column["columnDataRows"] = data_column_rows
+                    else:
+                        data_column_rows = [base64.b64encode(row).decode(self.encoding) for row in data_column["columnDataRows"]]
+                        data_column["columnDataRows"] = data_column_rows
+                elif data_column["dataFlag"] == 0x01:
+                    pass
+                else:
+                    raise ValueError(f"unsupported data flag: {data_column["dataFlag"]}")
+            data_columns.append(data_column)
+
+        data["columns"] = data_columns
+
+        return data
+        
+    ## 将UTF表的数据输出为json
+    def jsonOutput(self, opt_path: str) -> None:
+        with open(opt_path, "w", encoding=self.encoding) as file:
+            json.dump(self.utf2DictJson(), file, ensure_ascii=False)
+
+    def jsonOutputRecursion(self, opt_path: str) -> None:
+        with open(opt_path, "w", encoding=self.encoding) as file:
+            json.dump(self.utf2DictJsonRecursion(), file, ensure_ascii=False)
+
+
+    ## 从字符串数据区域获取字符串，入参为其相对于字符串数据区域开头的偏移量
+    def stringDataGet(self, offset: int) -> str:
+        if offset >= self.strings_size:
+            raise ValueError(f"strings offset out of bounds: {offset:x}")
+        stream = self.stream
+        stream.seek(self.strings_offset + offset)
+        strbytes = bytearray()
+        strbyte = stream.read(1)
+        while strbyte != b"\x00":
+            strbytes += strbyte
+            strbyte = stream.read(1)
+        string = strbytes.decode(self.encoding)
+
+        return string
+    
+    ## 从字节数据区域获取二进制数据，入参为其相对于字节数据区域开头的偏移量及数据大小
+    def binaryDataGet(self, offset: int, size: int) -> bytes:
+        if offset + size > self.data_size:
+            raise ValueError(f"binary data offset out of bounds: {offset + size:x}")
+        stream = self.stream
+        stream.seek(self.data_offset + offset)
+
+        return stream.read(size)
+
+    ## 输出文件头数据，调试用
+    def headerDataOutput(self, opt_path: str) -> None:
+        headerID = self.headerID.decode()
+        header_data = {"headerID":headerID, "table_size":self.table_size, 
+                       "version":self.version, "rows_offset":self.rows_offset, 
+                       "strings_offset":self.strings_offset, "data_offset":self.data_offset, 
+                       "name_offset_rtst":self.name_offset_rtst, "columns_count":self.columns_count, 
+                       "row_width":self.row_width, "rows_count":self.rows_count
+                       }
+        
+        with open(opt_path, "w", encoding="utf8") as file:
+            json.dump(header_data, file, ensure_ascii=False, indent=4)
+
+
+
+
