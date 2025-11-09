@@ -6,6 +6,8 @@ from io import BytesIO, FileIO
 
 
 class AWB:
+    ## 文件头部大小为0x10字节，其后依次为ID表和偏移量表，再之后为子文件
+    ## 子文件根据『数据对齐偏移量』进行对齐
 
     def __init__(self, stream: str|bytes) -> None:
         if type(stream) == str:
@@ -33,12 +35,12 @@ class AWB:
         else:
             raise ValueError("invalid awb header")
         
-        self.version = struct.unpack("<B", stream.read(1))[0]
-        self.offset_size = struct.unpack("<B", stream.read(1))[0]
-        self.audioid_size = struct.unpack("<H", stream.read(2))[0]
-        self.subfiles_count = struct.unpack("<I", stream.read(4))[0]
-        self.offset_alignment = struct.unpack("<H", stream.read(2))[0]
-        self.subkey = struct.unpack("<H", stream.read(2))[0]
+        self.version            = struct.unpack("<B", stream.read(1))[0]
+        self.offset_size        = struct.unpack("<B", stream.read(1))[0]
+        self.audioid_size       = struct.unpack("<H", stream.read(2))[0]
+        self.subfiles_count     = struct.unpack("<I", stream.read(4))[0]
+        self.offset_alignment   = struct.unpack("<H", stream.read(2))[0]
+        self.subkey             = struct.unpack("<H", stream.read(2))[0]
         offset += 0x10
 
         ## 读取ID表
@@ -136,7 +138,8 @@ class AWB:
         header_data = {"headerID":headerID, "version":self.version, "offset_size":self.offset_size, 
                        "audioid_size":self.audioid_size, "subfiles_count":self.subfiles_count, 
                        "offset_alignment":self.offset_alignment, "subkey":self.subkey, 
-                       "audio_ids":self.audioids, "audio_offsets":self.audio_offsets}
+                       "audio_ids":self.audioids, "audio_offsets":self.audio_offsets
+                       }
         
         with open(opt_path, "w", encoding="utf8") as file:
             json.dump(header_data, file, ensure_ascii=False, indent=4)
