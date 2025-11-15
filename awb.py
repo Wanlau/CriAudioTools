@@ -3,13 +3,14 @@ import os
 import json
 import re
 from io import BytesIO, FileIO
+from collections.abc import Buffer
 
 
 class AWB:
     ## 文件头部大小为0x10字节，其后依次为ID表和偏移量表，再之后为子文件
     ## 子文件根据『数据对齐偏移量』进行对齐
 
-    def __init__(self, stream: str|bytes) -> None:
+    def __init__(self, stream: str|Buffer) -> None:
         if type(stream) == str:
             self.stream = FileIO(stream)
             self.filename = re.split(r"[/\\]", stream)[-1]
@@ -294,6 +295,5 @@ class AWBBuilder:
         header_data += bytes(self.offset_size * (self.subfiles_count+1))
 
         return bytes(header_data)
-
 
 
