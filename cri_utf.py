@@ -27,7 +27,7 @@ class UTFTableValueType(Enum):
     COLUMN_TYPE_UNDEFINED       = -1
 
 class UTFTable:
-    ## UTF表是Cri定义的一种数据结构，可嵌套
+    ## UTF表是CRI定义的一种数据结构，可嵌套
     ## 文件头部大小为0x20字节，其后依次为模式数据区域、行数据区域、字符串数据区域、字节数据区域
 
     def __init__(self, stream: str|Buffer, encoding: str="utf8") -> None:
@@ -243,6 +243,9 @@ class UTFTable:
     def utf2DictJson(self) -> dict:
         if not self.parsed:
             self.utfParse()
+
+        if len(self.columns) != self.columns_count:
+            raise ValueError(f"expected columns count {self.columns_count}, actual columns count {len(self.columns)}")
         
         data = {"tableName":self.table_name, "version":self.version, 
                 "rowsCount":self.rows_count, "columnsCount":self.columns_count}
@@ -278,6 +281,9 @@ class UTFTable:
         
         if not self.parsed:
             self.utfParse()
+
+        if len(self.columns) != self.columns_count:
+            raise ValueError(f"expected columns count {self.columns_count}, actual columns count {len(self.columns)}")
         
         data = {"tableName":self.table_name, "version":self.version, 
                 "rowsCount":self.rows_count, "columnsCount":self.columns_count}

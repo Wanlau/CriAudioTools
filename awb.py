@@ -7,6 +7,8 @@ from collections.abc import Buffer
 
 
 class AWB:
+    ## awb是CRI的一种音频存储格式，用于存储音频数据本身
+    ## awb文件通常与acb文件成对出现，awb文件可内嵌在acb文件中
     ## 文件头部大小为0x10字节，其后依次为ID表和偏移量表，再之后为子文件
     ## 子文件根据『数据对齐偏移量』进行对齐
 
