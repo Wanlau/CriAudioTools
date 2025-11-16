@@ -104,7 +104,7 @@ class UTFTable:
         offset_in_row = 0
         for _ in range(0, self.columns_count):
             if offset + 5 - 0x20 > self.schema_size:
-                raise ValueError(f"schema offset out of bounds: {offset + 5 - 0x20:x}")
+                raise ValueError(f"schema offset out of bounds: {offset + 5 - 0x20:#x}")
             stream.seek(offset)
             info        = struct.unpack(">B", stream.read(1))[0]
             name_offset = struct.unpack(">I", stream.read(4))[0]
@@ -184,8 +184,8 @@ class UTFTable:
 
             ## 读取常量数据
             if data_flag_constant:
-                if offset + value_size > self.schema_size:
-                    raise ValueError(f"schema offset out of bounds: {offset + value_size:x}")
+                if offset + value_size - 0x20 > self.schema_size:
+                    raise ValueError(f"schema offset out of bounds: {offset + value_size - 0x20:#x}")
                 stream.seek(offset)
                 column_value = struct.unpack(value_type_fc, stream.read(value_size))
                 offset += value_size
@@ -201,7 +201,7 @@ class UTFTable:
             ## 获取行数据偏移量并逐行读取数据
             if data_flag_row:
                 if offset_in_row + value_size > self.row_width:
-                    raise ValueError(f"row offset out of bounds: {offset_in_row + value_size:x}")
+                    raise ValueError(f"row offset out of bounds: {offset_in_row + value_size:#x}")
                 column_offset_in_row = offset_in_row
                 offset_in_row += value_size
 
@@ -340,7 +340,7 @@ class UTFTable:
     ## 从字符串数据区域获取字符串，入参为其相对于字符串数据区域开头的偏移量
     def stringDataGet(self, offset: int) -> str:
         if offset >= self.strings_size:
-            raise ValueError(f"strings offset out of bounds: {offset:x}")
+            raise ValueError(f"strings offset out of bounds: {offset:#x}")
         stream = self.stream
         stream.seek(self.strings_offset + offset)
         strbytes = bytearray()
@@ -355,7 +355,7 @@ class UTFTable:
     ## 从字节数据区域获取二进制数据，入参为其相对于字节数据区域开头的偏移量及数据大小
     def binaryDataGet(self, offset: int, size: int) -> bytes:
         if offset + size > self.data_size:
-            raise ValueError(f"binary data offset out of bounds: {offset + size:x}")
+            raise ValueError(f"binary data offset out of bounds: {offset + size:#x}")
         stream = self.stream
         stream.seek(self.data_offset + offset)
 
