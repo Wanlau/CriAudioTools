@@ -7,10 +7,14 @@ from io import BytesIO, FileIO
 from enum import Enum, unique
 from collections.abc import Buffer
 
+## UTF表所包含的数据类型
+## 这部分数据来自vgmstream
+## 
+## 有一种说法是此处的有符号/无符号类型应该反过来，但具体如何尚无定论
+## 在aic的文件中出现了以0xFFFF和0xFFFFFFFF表示『无』情况，但不知道它是以满值表示『无』还是以-1表示『无』
+## 在得到确定的结论之前，暂且与vgmstream保持一致
 @unique
 class UTFTableValueType(Enum):
-    ## UTF表所包含的数据类型
-    ## 此部分来自vgmstream
     COLUMN_TYPE_UINT8           = 0x00
     COLUMN_TYPE_SINT8           = 0x01
     COLUMN_TYPE_UINT16          = 0x02
@@ -30,7 +34,7 @@ class UTFTable:
     ## UTF表是CRI定义的一种数据结构，可嵌套
     ## 文件头部大小为0x20字节，其后依次为模式数据区域、行数据区域、字符串数据区域、字节数据区域
 
-    def __init__(self, stream: str|Buffer, encoding: str="utf8") -> None:
+    def __init__(self, stream: str | Buffer, encoding: str="utf8") -> None:
         if type(stream) == str:
             self.stream = FileIO(stream)
             self.filename = re.split(r"[/\\]", stream)[-1]
@@ -374,6 +378,43 @@ class UTFTable:
         with open(opt_path, "w", encoding="utf8") as file:
             json.dump(header_data, file, ensure_ascii=False, indent=4)
 
+    ## 检查各列名称是否重复，并返回列名-列索引字典
+    def checkColumnsName(self) -> dict[str, int]:
+        columns_name = {}
+        for idx in range(0, self.columns_count):
+            column = self.columns[idx]
+            if column["columnName"] not in columns_name:
+                columns_name[column["columnName"]] = idx
+            ## "Non"表示无效列???
+            elif column["columnName"] == "Non":
+                pass
+            else:
+                raise ValueError(f"duplicate column name: {column["columnName"]}")
+            
+        return columns_name
+    
+    ## 根据列名及行索引获取数据
+    def getDataValue(self, column_name: str, row_idx: int):
+        if "columns_names_dict" not in self.__dict__:
+            self.columns_names_dict = self.checkColumnsName()
+
+        if column_name not in self.columns_names_dict:
+            raise ValueError(f"column not found: {column_name}")
+        
+        if (row_idx < 0) or (row_idx >= self.rows_count):
+            raise ValueError(f"invalid row index: {row_idx}")
+        
+        column = self.columns[self.columns_names_dict[column_name]]
+        if column["dataFlag"] == 0x01:
+            return None
+        elif column["dataFlag"] == 0x03:
+            return column["columnDataConstant"]
+        elif column["dataFlag"] == 0x05:
+            return column["columnDataRows"][row_idx]
+        else:
+            raise ValueError(f"unsupported data flag: {column["dataFlag"]}")
+
+
 
 
 class UTFTableBuilder:
@@ -385,7 +426,7 @@ class UTFTableBuilder:
     ## encoding为构建UTF表时处理字符串所使用的编码，打开json文件时也会使用之
     ## offset_alignment为数据对齐偏移量，用于向字节数据区域写入数据时的对齐
     ## (aic的acb文件一般是以0x20为数据对齐偏移量进行对齐的，但实际上未经对齐处理的acb文件也能被正常读取)
-    def __init__(self, data_raw: UTFTable|dict|str, encoding: str="utf8", offset_alignment: int|None=None) -> None:
+    def __init__(self, data_raw: UTFTable | dict | str, encoding: str="utf8", offset_alignment: int | None = None) -> None:
         self.from_UTFTable = False
         self.encoding = encoding
         self.offset_alignment = offset_alignment
@@ -616,7 +657,7 @@ class UTFTableBuilder:
 
         data_columns = []
         for column_raw in self.data_raw_dict["columns"]:
-            column_data = []
+            column_data = {}
             column_data["dataFlag"] = column_raw["dataFlag"]
             column_data["valueType"] = column_raw["valueType"]
 

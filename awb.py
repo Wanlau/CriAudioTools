@@ -12,7 +12,7 @@ class AWB:
     ## 文件头部大小为0x10字节，其后依次为ID表和偏移量表，再之后为子文件
     ## 子文件根据『数据对齐偏移量』进行对齐
 
-    def __init__(self, stream: str|Buffer) -> None:
+    def __init__(self, stream: str | Buffer) -> None:
         if type(stream) == str:
             self.stream = FileIO(stream)
             self.filename = re.split(r"[/\\]", stream)[-1]
@@ -91,7 +91,7 @@ class AWB:
         if remainder > 0:
             self.audio_offsets[0] = self.audio_offsets[0] - remainder + self.offset_alignment
 
-    def extract(self, opt_dir, acb_data : dict|None = None) -> None:
+    def extract(self, opt_dir, acb_data : dict | None = None) -> None:
         ## 从awb中解包音频，并输出至指定目录
         ## 音频文件名通过解析相应的acb文件获得，若无acb数据，则默认以『awb文件名_音频ID』作为文件名
         ## awb可打包不同类型的音频文件，文件的后缀名将由其类型决定，目前已处理的音频类型有：hca
@@ -120,7 +120,7 @@ class AWB:
                 file.write(data)
 
     ## 根据文件头部判断文件类型
-    def getFileType(self, header: bytes) -> str|None:
+    def getFileType(self, header: bytes) -> str | None:
         if header.startswith(b"HCA\x00"):
             return "HCA"
         elif header.startswith(b"\xC8\xC3\xC1\x00"):
@@ -129,7 +129,7 @@ class AWB:
             return None
         
     ## 根据文件类型设置文件后缀名
-    def fileSuffixSet(self, sf_type: str|None) -> str:
+    def fileSuffixSet(self, sf_type: str | None) -> str:
         if sf_type in ("HCA", "EHCA"):
             return "hca"
         else:
@@ -160,7 +160,7 @@ class AWBBuilder:
     ## offset_alignment为数据对齐偏移量，建议为0x10的整数倍
     ## subkey为EHCA解密用的subkey，若无此需要可默认其为0
     ## offset_mode为偏移量表生成模式，为0则指向上一个子文件的末尾，为1则指向对应子文件的开头；样本文件里的大多是指向上一个子文件末尾的，所以默认使用模式0
-    def __init__(self, subfiles: list[str]|tuple[str], 
+    def __init__(self, subfiles: list[str] | tuple[str], 
                  version: int=2, offset_size: int=0x04, audioid_size: int=0x04, 
                  offset_alignment: int=0x20, subkey: int=0x00, offset_mode: int=0) -> None:
         self.sunfiles = subfiles
